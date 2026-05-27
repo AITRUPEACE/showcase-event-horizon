@@ -1,36 +1,36 @@
 # Event Horizon
 
-> A map-first product for vendor-dense events. Organizers publish a live event map; attendees open one link on their phone — no app install — and find vendors, food, stages, and amenities.
+> One QR code at the gate. Scan it, and every vendor, every stage, every washroom shows up on a searchable map in the attendee's phone browser. **No app, no download, no signup.**
 
 🔗 **Live:** [event-horizon.to](https://event-horizon.to)
-📝 **Case study:** [event-horizon.to/build](https://event-horizon.to/build) — first post live, more drafting
+📝 **Case study:** [event-horizon.to/build](https://event-horizon.to/build) — story 01 (schema) live; stories 02–04 (Leaflet, realtime, AI co-pilot) drafting
 
-> This is a **showcase repository**. The product is closed-source. What's here: an overview, the architecture, the stack, and the implementation details I'm most proud of (and a few I had to rip up and rebuild).
+> This is a **showcase repository**. The product is closed-source. What's here: overview, architecture, stack, and the implementation work I'd point a hiring manager or collaborator at.
 
 ---
 
 ## Screenshots
 
-![Map view](./screenshots/map.png)
-![Editor](./screenshots/editor.png)
-![Mobile drawer](./screenshots/mobile.png)
+![Attendee map](./screenshots/map.png)
+![Organizer editor](./screenshots/editor.png)
+![Geofence-aware wayfinding](./screenshots/wayfinding.png)
 
 > Placeholder image refs. Drop PNGs into `./screenshots/` with these names.
 
 ---
 
-## The product loop
+## The wedge
 
-```
-Organizer creates and publishes a map
-  → shares one event link
-  → attendee opens it on phone
-  → attendee finds places and uses the map
-  → attendee engages (comments, photos, favorites, live activity)
-  → organizer sees activity and analytics
-```
+Built for **vendor-dense outdoor events**. Street festivals, food truck rallies, ribfests, markets, fairs — events where the floor plan *is* the product.
 
-The MVP is deliberately narrow: organizer-bought, attendee-facing, no-download. Vendors are organizer-managed POIs in this phase; vendor self-service is a later layer on top of the same data model.
+At a 50-vendor food festival, the average attendee finds maybe eight or ten booths before they call it a night. The rest of the vendors are two aisles over, unseen, through a crowd. That's a navigation problem, and a paper map at the entrance doesn't solve it. Event Horizon does:
+
+- **One QR code at the gate** → live searchable map in the phone browser
+- **Search** for *sliders*, filter to *open now*, tap a pin for hours and menu photos
+- **Inside the perimeter**, the app takes over from Google Maps and shows live distance + cardinal direction ("40m northeast, past the main stage") — turn-by-turn is for driving *to* the event, not getting around *inside* it
+- **Outside the perimeter**, Google Maps handles wayfinding to the gate
+
+That perimeter handoff is the literal "event horizon" the product is named after.
 
 ---
 
@@ -39,51 +39,63 @@ The MVP is deliberately narrow: organizer-bought, attendee-facing, no-download. 
 | Layer | Choice |
 | --- | --- |
 | Framework | Next.js 15 (App Router) on Vercel |
-| UI | React 19, Tailwind v4, shadcn/Radix, Framer Motion |
-| Map | Leaflet + React Leaflet, `@geoman-io/leaflet-geoman-free` for org-side drawing, Turf for geometry |
-| State | Zustand (+ `zundo` for undo/redo in the editor) |
-| Data | Supabase Postgres, Supabase Auth, Supabase Realtime, RLS-first |
-| AI | OpenAI for the org-side co-pilot (schema-aware tool-calling on top of Supabase) |
-| Email | Resend (org notifications, daily schedule digest) |
-| PWA | Serwist service worker; install-to-home-screen attendee path |
-| Testing | Jest + Testing Library, Playwright for e2e |
+| UI | React 19, Tailwind v4, shadcn/Radix, Framer Motion, `vaul` mobile drawer |
+| Map | Leaflet + React Leaflet, `@geoman-io/leaflet-geoman-free` (organizer drawing), Turf for in-polygon checks |
+| State | Zustand (+ `zundo` for undo/redo in the editor), `@dnd-kit` for reordering |
+| Data | Supabase Postgres + Auth + Realtime, RLS-first, single `event` schema |
+| AI | OpenAI for the organizer-side co-pilot (schema-aware tool-calling) |
+| Email | Resend (organizer notifications, daily schedule digest, opt-in capture) |
+| Maps PDF | `pdf-lib` for the printable QR kit organizers hand to volunteers |
+| PWA | Serwist |
+| Testing | Jest + Testing Library, Playwright e2e |
+| Deploy | Vercel; canonical domain `event-horizon.to` |
 
 ---
 
 ## Architecture at a glance
 
-- **Single Postgres schema (`event`)** owns the world: events, POIs, zones, vendors, performers, schedule items. RLS rules separate organizer reads/writes from attendee reads.
-- **Two discriminators on `pois`**: `entity_type` (coarse, drives which feature modules apply) and `category` (fine, drives icon and visual treatment). Same row; two axes. This took three refactors to get right — see the case study.
-- **JSONB with a rule.** Anything rendered but never queried lives in `pois.data`. Anything filtered, indexed, sorted, or joined on earns its own column. Sibling tables (`vendors`, `performers`, `schedule_items`) exist only for entities that have their own lifecycle (own auth, own RLS, own Stripe attachment).
-- **Realtime that doesn't set the DB on fire.** Broadcast channels for ephemeral live activity, DB subscriptions only for state the client must trust, a freshness budget on the rest. Details in case-study story 03 (drafting).
-- **Server Actions over API routes** for org-side mutations; route handlers reserved for webhooks, OG images, and the AI co-pilot stream.
-- **PDF export for organizers** built with `pdf-lib` directly from the same POI geometry that renders on the web map.
+- **Single Postgres schema** (`event`) for events, POIs, zones, vendors, performers, schedule items. Org-scoped RLS via `event.organization_members`; attendee reads via published-state RLS.
+- **Two discriminators on `pois`**: `entity_type` (coarse — decides which feature modules apply) and `category` (fine — drives icon and visual treatment). One row, two axes. Took three refactors to land — full walkthrough in the case study.
+- **JSONB with a rule.** Anything rendered but never queried lives in `pois.data`. Anything filtered/indexed/sorted/joined earns its own column. Sibling tables (`vendors`, `performers`, `schedule_items`) only for entities with their own lifecycle.
+- **Server Actions for organizer mutations.** API route handlers reserved for webhooks, OG images, the QR-kit PDF endpoint, and the AI co-pilot stream.
+- **Anonymous engagement.** Comments, photos, favorites, and "live" activity work without an attendee account — privacy-safe `sessionId` hashing in `engagement_progress` keeps the auth-on-action wedge intact.
+- **QR kit pipeline.** A single endpoint generates a print-ready PDF with per-zone QR codes, all resolving through `NEXT_PUBLIC_APP_URL` so the URLs are stable across pilots.
 
 ---
 
 ## Implementation details worth a look
 
+### Geofence-aware wayfinding
+When the attendee is outside the event polygon, the app delegates directions to Google Maps. When they cross the perimeter, the UI flips to in-event mode: distance in meters + cardinal direction to the selected POI. Turf does the point-in-polygon check; the polygon itself is organizer-drawn in the editor with Geoman.
+
 ### POI schema, v0 → v3
-The longest-running design problem in the codebase. v0 was a single `pois` table with a `poi_type` enum and a fat `metadata` JSONB column. v1 tried to fix the blob by splitting it into `vendor_data`, `stage_data`, `attraction_data`, `amenity_data` — which just moved the type soup one layer up. v2 collapsed them back into one `data` column with a discipline (render-only payload), reversed the vendor relationship (one vendor → many POIs via `pois.vendor_id`), and added a check constraint to keep the application code from having to remember it. v3 split the discriminator into two axes once the feature modules grew past the categories.
+The longest-running design problem in the codebase. v0 was a single table with a `poi_type` enum and a fat `metadata` JSONB. v1 split the blob into per-type columns and made it worse. v2 collapsed back to one `data` column with discipline, reversed the vendor relationship (one vendor → many POIs), and added a CHECK constraint so application code didn't have to remember it. v3 split the discriminator once feature modules outgrew categories.
 
 Full walkthrough with ERDs and the actual migrations: [event-horizon.to/build](https://event-horizon.to/build)
 
 ### Bending Leaflet to the product
-React Leaflet is great until you want z-index between marker layers, polygon zones the user can draw in-app, SSR safety with a library that reaches for `window` at import time, and pin grouping that doesn't fall apart at festival scale. Story 02 of the case study walks through what worked.
+React Leaflet is great until you want z-index between marker layers, organizer-drawn polygon zones, SSR safety with a library that reaches for `window` at import, and pin grouping that doesn't fall apart at festival scale. Story 02 of the case study walks through what worked.
 
-### AI co-pilot in the org loop
-Same MCP/agent pipeline pattern I built at Property Control, applied to my own product. The model gets read access to the event's schema and a narrow tool set for proposing edits; humans accept/reject. Story 04 of the case study.
+### Realtime that doesn't set the DB on fire
+Broadcast channels for ephemeral live activity, DB subscriptions only for state the client must trust, a freshness budget on the rest. Story 03.
 
-### Migrations that are safe to re-run
-Every block in non-trivial migrations is wrapped in `DO $$ BEGIN IF EXISTS ... END $$;` so a half-applied state recovers cleanly. Big refactors snapshot the affected tables into a `backup.*` schema at the top of the file. The rollback plan is part of the migration, not a separate document.
+### Migrations safe to re-run
+Every block in non-trivial migrations is wrapped in `DO $$ BEGIN IF EXISTS ... END $$;` so half-applied states recover cleanly. Big refactors snapshot the affected tables into a `backup.*` schema at the top of the file. The rollback plan is part of the migration.
+
+### Moat features (post-MVP, in flight)
+A thin layer turning every event into an acquisition channel for the next one — without breaking the no-download, no-signup wedge:
+
+- **Post-event "near you" discovery.** A printed QR on a telephone pole outlasts the event; scanning a post-event QR returns *"this one's done, here's what's near you next."*
+- **Single-field opt-in email capture.** Optional, post-use. No accounts.
+- **Organizer post-event dashboard + CSV export.** What the organizer takes back to their board to justify the next pilot.
 
 ---
 
 ## Project status
 
-- **MVP live.** Map, editor, attendee engagement, organizer analytics, live broadcasts.
-- **Case study in progress.** Story 01 (schema) live, stories 02–04 drafting.
-- **Pilot-stage commercials.** Organizer-, operator-, and sponsor-funded pilots before any vendor-marketplace plays.
+- **MVP live.** Map, organizer editor, anonymous engagement, organizer analytics, live broadcasts, geofence-aware wayfinding, QR kit PDF.
+- **Pilot stage.** 2026 Ontario rollout — food truck festivals, ribfests, street festivals around the Toronto metro.
+- **Case study in progress.** Story 01 (schema) live; stories 02–04 drafting.
 
 ---
 
